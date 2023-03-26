@@ -1,0 +1,8 @@
+David P. Sugar has released under GPL this plugin for Wireshark. 
+It decodes the CTAPHID protocol used by the CTAP2 protocol 
+developed by the FIDO Alliance.
+
+The plugin decodes the communication protocol between a client
+and an FIDO authenticator.
+
+The author is David P. Sugar <david@thesugar.de>.
