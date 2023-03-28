@@ -143,17 +143,13 @@ static const fragment_items msg_frag_items = {
 };
 
 static void
-dissect_cmd_init(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, gint *offset, CTAPHID_stats *stats)
+dissect_cmd_init(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, gint *offset, CTAPHID_stats *stats)
 {
     if (stats->bcnt == 8) { // client -> authenticator
-        col_append_fstr(pinfo->cinfo, COL_INFO, ", Client -> Authenticator");
-
         // nonce
         proto_tree_add_item(tree, hf_CTAPHID_init_nonce, tvb, *offset, 8, ENC_BIG_ENDIAN);
         *offset += 8;
     } else if (stats->bcnt == 17) {
-        col_append_fstr(pinfo->cinfo, COL_INFO, ", Authenticator -> Client");
-
         // nonce
         proto_tree_add_item(tree, hf_CTAPHID_init_nonce, tvb, *offset, 8, ENC_BIG_ENDIAN);
         *offset += 8;
@@ -238,16 +234,18 @@ dissect_cmd_cbor(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, gint *
                 "Reassembled Message", frag_msg, &msg_frag_items,
                 NULL, tree);
 
-        if (frag_msg) { // Reassembled
-            col_append_str(pinfo->cinfo, COL_INFO, " (Message Reassembled)");
-        } else { // Not last packet of reassembled Short Message
-            col_append_fstr(pinfo->cinfo, COL_INFO, " (Message fragment %u)", stats->seq);
-        }
+        //if (frag_msg) { // Reassembled
+        //    col_append_str(pinfo->cinfo, COL_INFO, " (Message Reassembled)");
+        //} else { // Not last packet of reassembled Short Message
+        //    col_append_fstr(pinfo->cinfo, COL_INFO, " (Message fragment %u)", stats->seq);
+        //}
 
         if (new_tvb) { // take it all
             next_tvb = new_tvb;
+            col_append_str(pinfo->cinfo, COL_INFO, " (Message Reassembled)");
         } else { // make a new subset
             next_tvb = tvb_new_subset_remaining(tvb, *offset);
+            col_append_fstr(pinfo->cinfo, COL_INFO, " (Message fragment %u)", stats->seq);
         }
     } else {
         next_tvb = tvb_new_subset_remaining(tvb, *offset);
@@ -257,19 +255,6 @@ dissect_cmd_cbor(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, gint *
     stats->bcnt_rec += rem;
     pinfo->fragmented = save_fragmented;
     /* Reassemble CBOR message END */
-
-
-    //if (stats->src == client || stats->src == ndef)
-    //{
-    //    col_append_fstr(pinfo->cinfo, COL_INFO, ", Client -> Authenticator");
-    //} 
-    //else
-    //{
-    //    col_append_fstr(pinfo->cinfo, COL_INFO, ", Authenticator -> Client");
-    //}
-
-    //printf("%d\n", tvb_captured_length_remaining(tvb, *offset));
-
 }
 
 static int
