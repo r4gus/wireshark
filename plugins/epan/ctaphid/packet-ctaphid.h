@@ -1,5 +1,7 @@
 #include "config.h"
 #include <epan/packet.h>
+#include <epan/reassemble.h>
+#include <epan/addr_resolv.h>
 
 #define IF_CLASS_HID 0x03
 
@@ -37,13 +39,20 @@
 #define COUNT_MSG   1
 #define COUNT_PING  2
 
+typedef enum { client, authenticator, ndef } CTAPHID_src;
+
 typedef struct {
     /* Current CTAPHID packet type */
     guint8 type;
     /* Current CTAPHID command */
     guint8 cmd;
+    /* Sequence number */
+    guint8 seq;
     /* Current CTAPHID byte count */
-    guint16 bcnt;   
+    guint16 bcnt;
+    /* Byte already received */
+    guint16 bcnt_rec;
     /* Init packet count for different commands */
     gint init_count[3];
+    CTAPHID_src src;
 } CTAPHID_stats;

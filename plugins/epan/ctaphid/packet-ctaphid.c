@@ -21,7 +21,23 @@ static int hf_CTAPHID_init_capabilities_nmsg_flag = -1;
 static int hf_CTAP_cmd = -1;
 static int hf_CTAP_status = -1;
 
+static int hf_msg_fragments = -1;
+static int hf_msg_fragment = -1;
+static int hf_msg_fragment_overlap = -1;
+static int hf_msg_fragment_overlap_conflicts = -1;
+static int hf_msg_fragment_multiple_tails = -1;
+static int hf_msg_fragment_too_long_fragment = -1;
+static int hf_msg_fragment_error = -1;
+static int hf_msg_fragment_count = -1;
+static int hf_msg_reassembled_in = -1;
+static int hf_msg_reassembled_length = -1;
+
 static gint ett_CTAPHID = -1;
+
+static gint ett_msg_fragment = -1;
+static gint ett_msg_fragments = -1;
+
+static reassembly_table msg_reassembly_table;
 
 static const value_string packettypenames[] = {
     { 0x80, "INIT" },
@@ -104,6 +120,28 @@ static const value_string ctapstatusnames[] = {
     { 0x7F, "CTAP1_ERR_OTHER" },
 };
 
+static const fragment_items msg_frag_items = {
+    /* Fragment subtrees */
+    &ett_msg_fragment,
+    &ett_msg_fragments,
+    /* Fragment fields */
+    &hf_msg_fragments,
+    &hf_msg_fragment,
+    &hf_msg_fragment_overlap,
+    &hf_msg_fragment_overlap_conflicts,
+    &hf_msg_fragment_multiple_tails,
+    &hf_msg_fragment_too_long_fragment,
+    &hf_msg_fragment_error,
+    &hf_msg_fragment_count,
+    /* Reassembled in field */
+    &hf_msg_reassembled_in,
+    /* Reassembled length field */
+    &hf_msg_reassembled_length,
+    NULL,
+    /* Tag */
+    "Message fragments"
+};
+
 static void
 dissect_cmd_init(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, gint *offset, CTAPHID_stats *stats)
 {
@@ -158,20 +196,59 @@ static void
 dissect_cmd_cbor(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, gint *offset, CTAPHID_stats *stats)
 {
     /* Try to guess the direction of communication based on the given stats */
-    if (stats->type == CTAPHID_PACKET_TYPE_INIT && stats->init_count[COUNT_CBOR] % 2 == 1) // TODO: this is a very curde heuristic
+    if (stats->type == CTAPHID_PACKET_TYPE_INIT && (stats->src == client || stats->src == ndef)) 
     {
         // CTAP command byte
         proto_tree_add_item(tree, hf_CTAP_cmd, tvb, *offset, 1, ENC_BIG_ENDIAN);
         *offset += 1;
     } 
-    else if (stats->type == CTAPHID_PACKET_TYPE_INIT && stats->init_count[COUNT_CBOR] % 2 == 0)
+    else if (stats->type == CTAPHID_PACKET_TYPE_INIT && stats->src == authenticator)
     {
         // CTAP command byte
         proto_tree_add_item(tree, hf_CTAP_status, tvb, *offset, 1, ENC_BIG_ENDIAN);
         *offset += 1;
     }
+    
+    /* Reassemble CBOR message START */
+    gint rem = tvb_captured_length_remaining(tvb, *offset);
+    gboolean save_fragmented = pinfo->fragmented;
+    tvbuff_t *next_tvb _U_ = NULL; // TODO: what for???
 
-    if (stats->init_count[COUNT_CBOR] % 2 == 1) // TODO: this is a very curde heuristic
+    if (stats->bcnt >= stats->bcnt_rec + rem) { // fragmented // TODO this will fail for the last packet
+        tvbuff_t *new_tvb = NULL;
+        fragment_head *frag_msg = NULL;
+
+        pinfo->fragmented = TRUE;
+        frag_msg = fragment_add_seq_check(&msg_reassembly_table,
+            tvb, *offset, pinfo,
+            0, NULL,
+            stats->seq, rem,
+            stats->bcnt_rec >= stats->bcnt // more fragments ?
+        );
+
+        new_tvb = process_reassembled_data(tvb, *offset, pinfo,
+                "Reassembled Message", frag_msg, &msg_frag_items,
+                NULL, tree);
+
+        if (frag_msg) { // Reassembled
+            col_append_str(pinfo->cinfo, COL_INFO, " (Message Reassembled)");
+        } else { // Not last packet of reassembled Short Message
+            col_append_fstr(pinfo->cinfo, COL_INFO, " (Message fragment %u)", stats->seq);
+        }
+
+        if (new_tvb) { // take it all
+            next_tvb = new_tvb;
+        } else { // make a new subset
+            next_tvb = tvb_new_subset_remaining(tvb, *offset);
+        }
+    } else {
+        next_tvb = tvb_new_subset_remaining(tvb, *offset);
+    }
+    /* Reassemble CBOR message END */
+
+    pinfo->fragmented = save_fragmented;
+
+    if (stats->src == client || stats->src == ndef)
     {
         col_append_fstr(pinfo->cinfo, COL_INFO, ", Client -> Authenticator");
     } 
@@ -179,6 +256,8 @@ dissect_cmd_cbor(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, gint *
     {
         col_append_fstr(pinfo->cinfo, COL_INFO, ", Authenticator -> Client");
     }
+
+    //printf("%d\n", tvb_captured_length_remaining(tvb, *offset));
 
 }
 
@@ -193,6 +272,20 @@ dissect_CTAPHID(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *d
 
     gint offset = 0;
     stats.type = tvb_get_guint8(tvb, 4) & 0x80;
+    
+    /* Try to determine if client or auth are the src */
+    guint8 *str_src_addr = address_to_str(pinfo->pool, &pinfo->src);
+    guint8 *str_dst_addr = address_to_str(pinfo->pool, &pinfo->dst);
+    bool host_is_src = memcmp("host", str_src_addr, 4) == 0;
+    bool dev_is_src = memcmp("host", str_dst_addr, 4) == 0;
+
+    if (host_is_src) {
+        stats.src = client;
+    } else if (dev_is_src) {
+        stats.src = authenticator;
+    } else {
+        stats.src = ndef;
+    }
 
     /* Info */
     col_set_str(pinfo->cinfo, COL_PROTOCOL, "CTAPHID");
@@ -235,10 +328,13 @@ dissect_CTAPHID(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *d
  
         // byte count
         stats.bcnt = tvb_get_guint16(tvb, offset, ENC_BIG_ENDIAN);
+        stats.bcnt_rec = 0;
+        stats.seq = 0;
         proto_tree_add_item(CTAPHID_tree, hf_CTAPHID_bcnt, tvb, offset, 2, ENC_BIG_ENDIAN);
         offset += 2;
     } else if (stats.type == CTAPHID_PACKET_TYPE_CONT) {
         // sequence number
+        stats.seq = (tvb_get_guint8(tvb, offset) & 0x7F) + 1;
         proto_tree_add_item(CTAPHID_tree, hf_CTAPHID_seq, tvb, offset, 1, ENC_BIG_ENDIAN);
         offset += 1;
     } 
@@ -383,11 +479,23 @@ proto_register_CTAPHID(void)
               VALS(ctapstatusnames), 0x00,
               NULL, HFILL }
         },
+        {&hf_msg_fragments,                   {"Message fragments",                                   "msg.fragments",                  FT_NONE,        BASE_NONE,  NULL,   0x00,   NULL, HFILL}},
+        {&hf_msg_fragment,                    {"Message fragment",                                    "msg.fragment",                   FT_FRAMENUM,    BASE_NONE,  NULL,   0x00,   NULL, HFILL}},
+        {&hf_msg_fragment_overlap,            {"Message fragment overlap",                            "msg.fragment.overlap",           FT_BOOLEAN,     BASE_NONE,  NULL,   0x00,   NULL, HFILL}},
+        {&hf_msg_fragment_overlap_conflicts,  {"Message fragment overlapping with conflicting data",  "msg.fragment.overlap.conflicts", FT_BOOLEAN,     BASE_NONE,  NULL,   0x00,   NULL, HFILL}},
+        {&hf_msg_fragment_multiple_tails,     {"Message has multiple tail fragments",                 "msg.fragment.multiple_tails",    FT_BOOLEAN,     BASE_NONE,  NULL,   0x00,   NULL, HFILL}},
+        {&hf_msg_fragment_too_long_fragment,  {"Message fragment too long",                           "msg.fragment.too_long_fragment", FT_BOOLEAN,     BASE_NONE,  NULL,   0x00,   NULL, HFILL}},
+        {&hf_msg_fragment_error,              {"Message defragmentation error",                       "msg.fragment.error",             FT_FRAMENUM,    BASE_NONE,  NULL,   0x00,   NULL, HFILL}},
+        {&hf_msg_fragment_count,              {"Message fragment count",                              "msg.fragment.count",             FT_UINT32,      BASE_DEC,   NULL,   0x00,   NULL, HFILL}},
+        {&hf_msg_reassembled_in,              {"Reassembled in",                                      "msg.reassembled.in",             FT_FRAMENUM,    BASE_NONE,  NULL,   0x00,   NULL, HFILL}},
+        {&hf_msg_reassembled_length,          {"Reassembled length",                                  "msg.reassembled.length",         FT_UINT32,      BASE_DEC,   NULL,   0x00,   NULL, HFILL}},
     };
 
     /* Setup protocol subtree array */
     static gint *ett[] = {
-        &ett_CTAPHID
+        &ett_CTAPHID,
+        &ett_msg_fragment,
+        &ett_msg_fragments,
     };
 
     proto_CTAPHID = proto_register_protocol (
@@ -398,6 +506,9 @@ proto_register_CTAPHID(void)
 
     proto_register_field_array(proto_CTAPHID, hf, array_length(hf));
     proto_register_subtree_array(ett, array_length(ett));
+
+    reassembly_table_register(&msg_reassembly_table,
+            &addresses_ports_reassembly_table_functions);
 }
 
 void
