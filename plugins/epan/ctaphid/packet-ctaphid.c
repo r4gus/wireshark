@@ -213,8 +213,16 @@ dissect_cmd_cbor(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, gint *
     gint rem = tvb_captured_length_remaining(tvb, *offset);
     gboolean save_fragmented = pinfo->fragmented;
     tvbuff_t *next_tvb _U_ = NULL; // TODO: what for???
+    bool more_to_come = true;
+    
+    if (stats->bcnt_rec + rem > stats->bcnt) { // rem holds more bytes than expected
+        rem = stats->bcnt - stats->bcnt_rec - 1;
+        more_to_come = false;
+    } else if (stats->bcnt_rec + rem == stats->bcnt) { // holds exactly the bytes expected
+        more_to_come = false;
+    } 
 
-    if (stats->bcnt >= stats->bcnt_rec + rem) { // fragmented // TODO this will fail for the last packet
+    if (stats->fragmented) {
         tvbuff_t *new_tvb = NULL;
         fragment_head *frag_msg = NULL;
 
@@ -223,7 +231,7 @@ dissect_cmd_cbor(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, gint *
             tvb, *offset, pinfo,
             0, NULL,
             stats->seq, rem,
-            stats->bcnt_rec >= stats->bcnt // more fragments ?
+            more_to_come // more fragments ?
         );
 
         new_tvb = process_reassembled_data(tvb, *offset, pinfo,
@@ -244,18 +252,21 @@ dissect_cmd_cbor(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, gint *
     } else {
         next_tvb = tvb_new_subset_remaining(tvb, *offset);
     }
+
+    *offset += rem;
+    stats->bcnt_rec += rem;
+    pinfo->fragmented = save_fragmented;
     /* Reassemble CBOR message END */
 
-    pinfo->fragmented = save_fragmented;
 
-    if (stats->src == client || stats->src == ndef)
-    {
-        col_append_fstr(pinfo->cinfo, COL_INFO, ", Client -> Authenticator");
-    } 
-    else
-    {
-        col_append_fstr(pinfo->cinfo, COL_INFO, ", Authenticator -> Client");
-    }
+    //if (stats->src == client || stats->src == ndef)
+    //{
+    //    col_append_fstr(pinfo->cinfo, COL_INFO, ", Client -> Authenticator");
+    //} 
+    //else
+    //{
+    //    col_append_fstr(pinfo->cinfo, COL_INFO, ", Authenticator -> Client");
+    //}
 
     //printf("%d\n", tvb_captured_length_remaining(tvb, *offset));
 
@@ -332,11 +343,18 @@ dissect_CTAPHID(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *d
         stats.seq = 0;
         proto_tree_add_item(CTAPHID_tree, hf_CTAPHID_bcnt, tvb, offset, 2, ENC_BIG_ENDIAN);
         offset += 2;
+
+        // is fragmented?
+        stats.fragmented = (stats.bcnt > tvb_captured_length_remaining(tvb, offset)) ? 
+            true : false;
     } else if (stats.type == CTAPHID_PACKET_TYPE_CONT) {
         // sequence number
         stats.seq = (tvb_get_guint8(tvb, offset) & 0x7F) + 1;
         proto_tree_add_item(CTAPHID_tree, hf_CTAPHID_seq, tvb, offset, 1, ENC_BIG_ENDIAN);
         offset += 1;
+
+        // cont packets always indicate fragmented message
+        stats.fragmented = true;
     } 
     col_append_fstr(pinfo->cinfo, COL_INFO, ", Cmd: %s", val_to_str(stats.cmd, cmdnames, "Unknown (0x%02x)"));
 

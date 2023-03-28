@@ -52,6 +52,8 @@ typedef struct {
     guint16 bcnt;
     /* Byte already received */
     guint16 bcnt_rec;
+    /* Message is fragmented */
+    bool fragmented;
     /* Init packet count for different commands */
     gint init_count[3];
     CTAPHID_src src;
